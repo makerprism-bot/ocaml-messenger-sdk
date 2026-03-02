@@ -1,0 +1,4 @@
+(library
+ (name messenger_signal_bridge_v1)
+ (public_name messenger-signal-bridge-v1)
+ (modules signal_bridge_v1 messenger_signal_bridge_v1))
