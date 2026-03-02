@@ -35,3 +35,9 @@ dune build
 - Never print or commit real API tokens, bot secrets, phone numbers, chat IDs, or webhook secrets.
 - Redact token-like strings in logs and surfaced errors.
 - Treat message payloads as sensitive user data; prefer minimal structured logs.
+
+## Upstream PR Workflow
+
+- Canonical upstream is `makerprism/ocaml-messenger-sdk`.
+- Before opening/updating a PR to `upstream/main`, rebase your branch onto `upstream/main`.
+- If already pushed, update with `git push --force-with-lease`.
