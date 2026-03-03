@@ -137,7 +137,7 @@ module Make (Config : CONFIG) : Connector_intf.S = struct
          | _ -> None)
     | None -> None
 
-  let append_common_metadata fields metadata =
+  let append_common_metadata ?(allow_disable_web_page_preview = false) fields metadata =
     let with_thread =
       match metadata_int "message_thread_id" metadata with
       | Some value -> fields @ [ ("message_thread_id", `Int value) ]
@@ -148,9 +148,12 @@ module Make (Config : CONFIG) : Connector_intf.S = struct
       | Some value when value <> "" -> with_thread @ [ ("parse_mode", `String value) ]
       | _ -> with_thread
     in
-    match metadata_bool "disable_web_page_preview" metadata with
-    | Some value -> with_parse_mode @ [ ("disable_web_page_preview", `Bool value) ]
-    | None -> with_parse_mode
+    if not allow_disable_web_page_preview then
+      with_parse_mode
+    else
+      match metadata_bool "disable_web_page_preview" metadata with
+      | Some value -> with_parse_mode @ [ ("disable_web_page_preview", `Bool value) ]
+      | None -> with_parse_mode
 
   let post_message_request ~token ~method_name ~payload on_result =
     Config.Http.post
@@ -199,6 +202,7 @@ module Make (Config : CONFIG) : Connector_intf.S = struct
                  ( "sendMessage"
                  , `Assoc
                     (append_common_metadata
+                       ~allow_disable_web_page_preview:true
                        [ ("chat_id", `String chat_id)
                        ; ("text", `String message.text)
                        ]

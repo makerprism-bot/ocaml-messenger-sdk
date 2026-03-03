@@ -41,3 +41,22 @@ dune build
 - Canonical upstream is `makerprism/ocaml-messenger-sdk`.
 - Before opening/updating a PR to `upstream/main`, rebase your branch onto `upstream/main`.
 - If already pushed, update with `git push --force-with-lease`.
+
+## Package Changelog and Docs
+
+- For behavior or API changes in a package, update that package's `CHANGES.md` under `## Unreleased`.
+- Keep package `README.md` feature/status notes aligned with actual implementation state.
+- If adding or changing reference-source guidance, update `REFERENCE_IMPLEMENTATIONS.md` in the same package.
+
+## Reference Implementation Policy
+
+- Port behavior from reference implementations, but avoid copying code verbatim.
+- Prefer permissive-license references (MIT/BSL-compatible) for close adaptation.
+- Do not add incompatible-license source code to this repository.
+
+## Testing Expectations
+
+- For non-trivial behavior changes, add or update package-local tests in `packages/<name>/test/`.
+- Before proposing a PR, run:
+  - `dune build`
+  - `dune runtest`
