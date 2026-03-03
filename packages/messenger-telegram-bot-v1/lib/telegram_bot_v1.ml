@@ -52,7 +52,12 @@ module Make (Config : CONFIG) : Connector_intf.S = struct
            with _ -> None)
       | None -> None
     in
-    if status = 429 then
+    let code =
+      match error_code_opt with
+      | Some value when status >= 200 && status < 300 -> value
+      | _ -> status
+    in
+    if status = 429 || error_code_opt = Some 429 then
       Error_types.Rate_limited
         { retry_after_seconds; limit = None; remaining = Some 0 }
     else if status = 401 || error_code_opt = Some 401 then
@@ -60,8 +65,8 @@ module Make (Config : CONFIG) : Connector_intf.S = struct
     else if status = 403 || error_code_opt = Some 403 then
       Error_types.Auth_error (Error_types.Unauthorized message)
     else
-      let retriable = status >= 500 in
-      Error_types.Api_error { code = status; message; retriable }
+      let retriable = code >= 500 || status >= 500 in
+      Error_types.Api_error { code; message; retriable }
 
   let with_token ~account_id on_ok on_error =
     match Config.get_bot_token ~account_id with
@@ -77,51 +82,122 @@ module Make (Config : CONFIG) : Connector_intf.S = struct
   let telegram_url ~token method_name =
     Printf.sprintf "%s/bot%s/%s" api_base token method_name
 
+  let validation_error field message =
+    Error_types.Validation_error [ { Error_types.field; message } ]
+
+  type media_kind =
+    | Photo
+    | Video
+
+  let media_kind_of_url media_url =
+    let strip_after marker value =
+      match String.index_opt value marker with
+      | Some idx -> String.sub value 0 idx
+      | None -> value
+    in
+    let extension =
+      media_url
+      |> strip_after '#'
+      |> strip_after '?'
+      |> String.lowercase_ascii
+      |> Filename.extension
+    in
+    match extension with
+    | ".jpg"
+    | ".jpeg"
+    | ".png"
+    | ".webp" -> Some Photo
+    | ".mp4"
+    | ".mov"
+    | ".m4v"
+    | ".webm"
+    | ".mpeg"
+    | ".mpg" -> Some Video
+    | _ -> None
+
+  let append_caption_if_non_empty fields text =
+    if String.trim text = "" then fields else fields @ [ ("caption", `String text) ]
+
+  let post_message_request ~token ~method_name ~payload on_result =
+    Config.Http.post
+      ~headers:[ ("Content-Type", "application/json") ]
+      ~body:(Yojson.Basic.to_string payload)
+      (telegram_url ~token method_name)
+      (fun resp ->
+        if resp.status >= 200 && resp.status < 300 then
+          (try
+             let json = Yojson.Basic.from_string resp.body in
+             let open Yojson.Basic.Util in
+             let ok = try json |> member "ok" |> to_bool with _ -> false in
+             if ok then
+               (match parse_message_id json with
+                | Some message_id -> on_result (Ok message_id)
+                | None ->
+                    on_result
+                      (Error
+                         (Error_types.Internal_error
+                            (Printf.sprintf
+                               "Telegram %s response missing result.message_id"
+                               method_name))))
+             else
+               on_result
+                 (Error (parse_api_error resp.status resp.body))
+           with _ ->
+             on_result
+               (Error
+                  (Error_types.Internal_error
+                     (Printf.sprintf "Failed to parse Telegram %s response" method_name))))
+        else
+          on_result (Error (parse_api_error resp.status resp.body)))
+      (fun err_msg ->
+        on_result
+          (Error Error_types.(Network_error (Connection_failed err_msg))))
+
   let send_message ~account_id message on_result =
     match Connector_intf.validate_outbound_message message with
     | Error errors -> on_result (Error (Error_types.Validation_error errors))
     | Ok () ->
-        with_token ~account_id
-          (fun token ->
-            let chat_id = recipient_to_chat_id message.Platform_types.recipient in
-            let payload =
-              `Assoc
-                [ ("chat_id", `String chat_id)
-                ; ("text", `String message.text)
-                ]
-            in
-            Config.Http.post
-              ~headers:[ ("Content-Type", "application/json") ]
-              ~body:(Yojson.Basic.to_string payload)
-              (telegram_url ~token "sendMessage")
-              (fun resp ->
-                if resp.status >= 200 && resp.status < 300 then
-                  (try
-                     let json = Yojson.Basic.from_string resp.body in
-                     let open Yojson.Basic.Util in
-                     let ok = try json |> member "ok" |> to_bool with _ -> false in
-                     if ok then
-                       (match parse_message_id json with
-                        | Some message_id -> on_result (Ok message_id)
-                        | None ->
-                            on_result
-                              (Error
-                                 (Error_types.Internal_error
-                                    "Telegram sendMessage response missing result.message_id")))
-                     else
-                       on_result
-                         (Error (parse_api_error resp.status resp.body))
-                   with _ ->
-                     on_result
-                       (Error
-                          (Error_types.Internal_error
-                             "Failed to parse Telegram sendMessage response")))
-                else
-                  on_result (Error (parse_api_error resp.status resp.body)))
-              (fun err_msg ->
-                on_result
-                  (Error Error_types.(Network_error (Connection_failed err_msg)))))
-          (fun err -> on_result (Error err))
+        let chat_id = recipient_to_chat_id message.Platform_types.recipient in
+        let request =
+          match message.Platform_types.media_urls with
+          | [] ->
+              Ok
+                ( "sendMessage"
+                , `Assoc
+                    [ ("chat_id", `String chat_id)
+                    ; ("text", `String message.text)
+                    ] )
+          | [ media_url ] ->
+              (match media_kind_of_url media_url with
+               | Some Photo ->
+                   Ok
+                     ( "sendPhoto"
+                     , `Assoc
+                         (append_caption_if_non_empty
+                            [ ("chat_id", `String chat_id); ("photo", `String media_url) ]
+                            message.text) )
+               | Some Video ->
+                   Ok
+                     ( "sendVideo"
+                     , `Assoc
+                         (append_caption_if_non_empty
+                            [ ("chat_id", `String chat_id); ("video", `String media_url) ]
+                            message.text) )
+               | None ->
+                   Error
+                     (validation_error "media_urls"
+                        "only image and video URLs are supported in telegram-bot-v1 MVP"))
+          | _ ->
+              Error
+                (validation_error "media_urls"
+                   "multiple media URLs are not supported in telegram-bot-v1 MVP")
+        in
+        (match request with
+         | Error err -> on_result (Error err)
+         | Ok (method_name, payload) ->
+             with_token ~account_id
+               (fun token -> post_message_request ~token ~method_name ~payload on_result)
+               (fun err -> on_result (Error err)))
 
   let send_thread ~account_id thread on_result =
     let total_requested = List.length thread.Platform_types.posts in
