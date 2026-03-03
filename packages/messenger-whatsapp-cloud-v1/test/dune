@@ -1,0 +1,4 @@
+(test
+ (name test_whatsapp_cloud_v1)
+ (modules test_whatsapp_cloud_v1)
+ (libraries messenger-whatsapp-cloud-v1 messenger-core yojson))

@@ -4,6 +4,8 @@ WhatsApp Cloud API client package for `ocaml-messenger-sdk`.
 
 This package targets business messaging workflows (text/template/media send, webhook verification, and delivery status handling) while following the runtime-agnostic patterns used across the SDK.
 
+Current implementation status: MVP connector support is available for text-only send, access validation, and sequential thread send. Media send paths are not implemented yet.
+
 ## Reference Implementations
 
 Detailed reference notes are maintained in `REFERENCE_IMPLEMENTATIONS.md`.

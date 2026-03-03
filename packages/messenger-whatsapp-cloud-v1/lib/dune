@@ -1,4 +1,5 @@
 (library
  (name messenger_whatsapp_cloud_v1)
  (public_name messenger-whatsapp-cloud-v1)
+ (libraries messenger_core yojson)
  (modules whatsapp_cloud_v1 messenger_whatsapp_cloud_v1))
