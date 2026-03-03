@@ -30,6 +30,12 @@ See `packages/messenger-signal-bridge-v1/REFERENCE_IMPLEMENTATIONS.md` for trust
 - `validate_access`: health/check probe using configured bridge endpoint and token.
 - `send_thread`: sequential message posting over `posts` with `thread_result` completion status.
 
+## Currently Supported Operations
+
+- Send text: `send_message` posts plain text messages to a single recipient.
+- Thread partial completion: `send_thread` posts sequentially and returns a `thread_result` with `posted_ids` plus `failed_at_index` when a later post fails.
+- Access validation: `validate_access` performs bridge health/auth validation using configured endpoint and bearer token.
+
 ## Reuse Policy
 
 - We use reference implementations for runtime behavior, bridge protocol semantics, and error handling expectations.

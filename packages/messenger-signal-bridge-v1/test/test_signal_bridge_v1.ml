@@ -118,6 +118,44 @@ let test_send_message_success () =
        | Some other -> fail ("unexpected authorization header: " ^ other)
        | None -> fail "missing authorization header")
 
+let test_send_message_trims_endpoint_trailing_slashes () =
+  reset_env ();
+  Config_state.endpoint_result := Ok (Some "  http://signal.bridge.test///  ");
+  Mock_http.next_post_responses :=
+    [ Ok { Http_client.status = 201; headers = []; body = "{\"id\":\"msg-1\"}" } ];
+  Connector.send_message ~account_id:"+12025550000" (sample_message "hello")
+    (function
+      | Ok "msg-1" -> ()
+      | Ok value -> fail ("expected message id msg-1, got " ^ value)
+      | Error err -> fail ("expected send success, got " ^ Error_types.to_string err));
+  match !Mock_http.requests with
+  | [] -> fail "expected one HTTP request"
+  | request :: _ ->
+      if request.url <> "http://signal.bridge.test/v2/send" then
+        fail ("unexpected normalized URL: " ^ request.url)
+
+let test_send_message_header_propagation () =
+  reset_env ();
+  Config_state.token_result := Ok (Some "  bridge-token  ");
+  Mock_http.next_post_responses :=
+    [ Ok { Http_client.status = 201; headers = []; body = "{\"id\":\"msg-2\"}" } ];
+  Connector.send_message ~account_id:"+12025550000" (sample_message "hello")
+    (function
+      | Ok "msg-2" -> ()
+      | Ok value -> fail ("expected message id msg-2, got " ^ value)
+      | Error err -> fail ("expected send success, got " ^ Error_types.to_string err));
+  match !Mock_http.requests with
+  | [] -> fail "expected one HTTP request"
+  | request :: _ ->
+      (match find_header "Authorization" request.headers with
+       | Some "Bearer bridge-token" -> ()
+       | Some other -> fail ("unexpected authorization header: " ^ other)
+       | None -> fail "missing authorization header");
+      (match find_header "Content-Type" request.headers with
+       | Some "application/json" -> ()
+       | Some other -> fail ("unexpected content-type header: " ^ other)
+       | None -> fail "missing content-type header")
+
 let test_send_message_rejects_media_urls () =
   reset_env ();
   let message =
@@ -149,6 +187,36 @@ let test_validate_access_success () =
   | request :: _ ->
       if request.url <> "http://signal.bridge.test/v1/health" then
         fail ("unexpected health URL: " ^ request.url)
+
+let test_validate_access_trims_endpoint_trailing_slashes () =
+  reset_env ();
+  Config_state.endpoint_result := Ok (Some "http://signal.bridge.test///");
+  Mock_http.next_get_response :=
+    Ok { Http_client.status = 200; headers = []; body = "{\"status\":\"ok\"}" };
+  Connector.validate_access ~account_id:"+12025550000" (function
+    | Ok () -> ()
+    | Error err -> fail ("expected validate_access success, got " ^ Error_types.to_string err));
+  match !Mock_http.requests with
+  | [] -> fail "expected health-check HTTP request"
+  | request :: _ ->
+      if request.url <> "http://signal.bridge.test/v1/health" then
+        fail ("unexpected normalized health URL: " ^ request.url)
+
+let test_validate_access_header_propagation () =
+  reset_env ();
+  Config_state.token_result := Ok (Some "  validate-token  ");
+  Mock_http.next_get_response :=
+    Ok { Http_client.status = 200; headers = []; body = "{\"status\":\"ok\"}" };
+  Connector.validate_access ~account_id:"+12025550000" (function
+    | Ok () -> ()
+    | Error err -> fail ("expected validate_access success, got " ^ Error_types.to_string err));
+  match !Mock_http.requests with
+  | [] -> fail "expected health-check HTTP request"
+  | request :: _ ->
+      (match find_header "Authorization" request.headers with
+       | Some "Bearer validate-token" -> ()
+       | Some other -> fail ("unexpected authorization header: " ^ other)
+       | None -> fail "missing authorization header")
 
 let test_validate_access_missing_token () =
   reset_env ();
@@ -252,12 +320,53 @@ let test_send_message_payload_rate_limit_with_retry_after () =
             ("expected Rate_limited with retry_after_seconds=Some 7, got "
            ^ Error_types.to_string err))
 
+let test_validate_access_payload_auth_mapping () =
+  reset_env ();
+  Mock_http.next_get_response :=
+    Ok
+      { Http_client.status = 200
+      ; headers = []
+      ; body = "{\"ok\":false,\"error\":\"unauthorized\",\"code\":401}"
+      };
+  Connector.validate_access ~account_id:"+12025550000" (function
+    | Ok () -> fail "expected auth error mapping"
+    | Error (Error_types.Auth_error Error_types.Invalid_token) -> ()
+    | Error err ->
+        fail
+          ("expected Invalid_token from payload-level auth error, got "
+         ^ Error_types.to_string err))
+
+let test_validate_access_payload_rate_limit_retry_after_header () =
+  reset_env ();
+  Mock_http.next_get_response :=
+    Ok
+      { Http_client.status = 200
+      ; headers = [ ("Retry-After", "13") ]
+      ; body = "{\"ok\":false,\"error\":\"rate limit\",\"code\":429}"
+      };
+  Connector.validate_access ~account_id:"+12025550000" (function
+    | Ok () -> fail "expected rate limit mapping"
+    | Error
+        (Error_types.Rate_limited
+          { retry_after_seconds = Some 13; limit = None; remaining = None }) ->
+        ()
+    | Error err ->
+        fail
+          ("expected Rate_limited with retry_after_seconds=Some 13, got "
+         ^ Error_types.to_string err))
+
 let () =
   test_send_message_success ();
+  test_send_message_trims_endpoint_trailing_slashes ();
+  test_send_message_header_propagation ();
   test_send_message_rejects_media_urls ();
   test_validate_access_success ();
+  test_validate_access_trims_endpoint_trailing_slashes ();
+  test_validate_access_header_propagation ();
   test_validate_access_missing_token ();
   test_send_thread_partial_failure_returns_thread_result ();
   test_send_message_payload_error_on_http_2xx ();
   test_send_message_payload_auth_mapping ();
-  test_send_message_payload_rate_limit_with_retry_after ()
+  test_send_message_payload_rate_limit_with_retry_after ();
+  test_validate_access_payload_auth_mapping ();
+  test_validate_access_payload_rate_limit_retry_after_header ()
