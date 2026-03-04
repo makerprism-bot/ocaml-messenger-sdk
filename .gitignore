@@ -32,6 +32,10 @@ setup.log
 # Dune generated files
 *.install
 
+# Dune lock directories (local dependency lock state)
+dune.lock/
+**/dune.lock/
+
 # Local OPAM switch
 _opam/
 
