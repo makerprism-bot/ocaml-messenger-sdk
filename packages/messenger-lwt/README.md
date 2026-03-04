@@ -9,13 +9,15 @@
   `Messenger_core.Http_client.HTTP_CLIENT` implementation into a Lwt-facing module
   (`request`, `get`, `post`, `post_multipart`, `put`, `delete`) returning
   `(response, error) result Lwt.t`.
+- `Messenger_lwt.Cohttp_http_client.Make` provides a concrete
+  `cohttp-lwt-unix` implementation of `Messenger_core.Http_client.HTTP_CLIENT`.
 
 ## What is intentionally stubbed
 
 - `Messenger_lwt.Http_client_stub.Make` is a deliberate placeholder backend.
 - Its methods always return an error indicating no concrete HTTP backend is
   wired.
-- This package does not currently ship a production HTTP runtime.
+- Keep this stub for deterministic tests and explicit dependency injection.
 
 ## Injecting your own HTTP client
 
@@ -31,3 +33,5 @@ module My_http_client_lwt = Messenger_lwt.Adapt_http_client (My_http_client)
 
 Use your own client module(s) in consumers; treat `Http_client_stub` as scaffold
 only.
+
+For a ready-to-use runtime backend, use `Messenger_lwt.Cohttp_http_client.Make`.

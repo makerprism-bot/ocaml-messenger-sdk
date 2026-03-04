@@ -1,0 +1,4 @@
+(test
+ (name test_messenger_lwt)
+ (modules test_messenger_lwt)
+ (libraries messenger-lwt messenger-core lwt cohttp-lwt-unix unix))
