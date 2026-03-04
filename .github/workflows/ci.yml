@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build and test
+
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubicloud-standard-2
+          - macos-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt update && sudo apt-get install -y libev-dev libgmp-dev libssl-dev pkg-config
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libev gmp openssl@3 pkg-config
+
+      - name: Setup Dune
+        uses: ocaml-dune/setup-dune@v1
+        with:
+          version: latest
+
+      - name: Lock dependencies
+        run: dune pkg lock
+
+      - name: Build project
+        run: dune build
+
+      - name: Run tests
+        run: dune runtest
+
+      - name: Verify package metadata in isolation
+        run: |
+          for pkg in \
+            messenger-core \
+            messenger-lwt \
+            messenger-whatsapp-cloud-v1 \
+            messenger-telegram-bot-v1 \
+            messenger-signal-bridge-v1
+          do
+            echo "Checking $pkg"
+            if [ "$pkg" = "messenger-core" ]; then
+              only_packages="$pkg"
+            else
+              only_packages="messenger-core,$pkg"
+            fi
+            dune pkg lock --only-packages="$only_packages"
+            dune build --only-packages="$only_packages" @pkg-install
+          done
