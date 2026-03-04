@@ -1,5 +1,5 @@
 (library
  (name messenger_lwt)
  (public_name messenger-lwt)
- (libraries messenger_core lwt)
- (modules lwt_adapter http_client_stub messenger_lwt))
+ (libraries messenger_core lwt cohttp-lwt-unix)
+ (modules lwt_adapter http_client_stub cohttp_http_client messenger_lwt))
