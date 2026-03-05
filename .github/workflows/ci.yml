@@ -47,12 +47,5 @@ jobs:
 
       - name: Verify package metadata in isolation
         run: |
-          for pkg in \
-            messenger-whatsapp-cloud-v1 \
-            messenger-telegram-bot-v1 \
-            messenger-signal-bridge-v1
-          do
-            echo "Checking $pkg"
-            dune pkg lock --only-packages="messenger-core,$pkg"
-            dune build --only-packages="messenger-core,$pkg" @pkg-install
-          done
+          dune pkg lock
+          dune build @pkg-install
