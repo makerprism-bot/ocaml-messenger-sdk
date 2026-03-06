@@ -18,6 +18,27 @@ type outbound_message = {
 
 type message_id = string
 
+type inbound_message = {
+  id : message_id;
+  sender_id : string option;
+  text : string option;
+  raw_payload : string;
+  metadata : (string * string) list;
+}
+
+type read_request = {
+  cursor : string option;
+  limit : int option;
+  webhook_payload : string option;
+  metadata : (string * string) list;
+}
+
+type read_result = {
+  messages : inbound_message list;
+  next_cursor : string option;
+  has_more : bool;
+}
+
 type thread_request = {
   posts : outbound_message list;
 }

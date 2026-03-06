@@ -382,6 +382,55 @@ let test_send_thread_partial_result () =
         if result.failed_at_index <> Some 1 then fail "expected failed_at_index=Some 1";
         if result.total_requested <> 3 then fail "expected total_requested=3")
 
+let test_read_messages_success_with_cursor () =
+  Mock_http.reset ();
+  Mock_http.next_post_response :=
+    Ok
+      { Http_client.status = 200
+      ; headers = []
+      ; body =
+          "{\"ok\":true,\"result\":[{\"update_id\":7,\"message\":{\"message_id\":100,\"from\":{\"id\":55},\"text\":\"hello\"}},{\"update_id\":8,\"message\":{\"message_id\":101,\"chat\":{\"id\":-1001},\"caption\":\"photo caption\"}}]}"
+      };
+  let request =
+    Platform_types.{ cursor = Some "7"; limit = Some 2; webhook_payload = None; metadata = [] }
+  in
+  Connector.read_messages ~account_id:"acct" request (function
+    | Error err -> fail ("expected read_messages success, got " ^ Error_types.to_string err)
+    | Ok result ->
+        if result.next_cursor <> Some "9" then fail "expected next cursor 9";
+        if not result.has_more then fail "expected has_more=true";
+        match result.messages with
+        | [ first; second ] ->
+            if first.id <> "100" || first.sender_id <> Some "55" || first.text <> Some "hello" then
+              fail "unexpected first inbound message";
+            if second.id <> "101" || second.sender_id <> Some "-1001" || second.text <> Some "photo caption" then
+              fail "unexpected second inbound message"
+        | _ -> fail "expected two inbound messages");
+  (match !(Mock_http.last_post_url) with
+   | Some "https://api.telegram.org/bot123456:ABCDEF/getUpdates" -> ()
+   | Some url -> fail ("expected getUpdates endpoint, got " ^ url)
+   | None -> fail "expected getUpdates request URL")
+
+let test_read_messages_invalid_cursor () =
+  Mock_http.reset ();
+  let request =
+    Platform_types.{ cursor = Some "not-an-int"; limit = Some 1; webhook_payload = None; metadata = [] }
+  in
+  Connector.read_messages ~account_id:"acct" request (function
+    | Ok _ -> fail "expected validation error for invalid cursor"
+    | Error (Error_types.Validation_error errors) ->
+        if not (List.exists (fun err -> err.Error_types.field = "cursor") errors) then
+          fail "expected cursor validation error"
+    | Error err -> fail ("expected Validation_error, got " ^ Error_types.to_string err));
+  if !(Mock_http.post_call_count) <> 0 then
+    fail "read_messages should not call HTTP for invalid cursor"
+
+let test_acknowledge_read_unsupported () =
+  Connector.acknowledge_read ~account_id:"acct" ~message_id:"100" (function
+    | Ok () -> fail "expected unsupported acknowledge_read error"
+    | Error (Error_types.Internal_error _) -> ()
+    | Error err -> fail ("expected Internal_error, got " ^ Error_types.to_string err))
+
 let () =
   test_send_message_success ();
   test_send_message_photo_success ();
@@ -398,4 +447,7 @@ let () =
   test_send_message_auth_error_payload ();
   test_validate_access_api_payload_error ();
   test_validate_access_invalid_json_response ();
-  test_send_thread_partial_result ()
+  test_send_thread_partial_result ();
+  test_read_messages_success_with_cursor ();
+  test_read_messages_invalid_cursor ();
+  test_acknowledge_read_unsupported ()

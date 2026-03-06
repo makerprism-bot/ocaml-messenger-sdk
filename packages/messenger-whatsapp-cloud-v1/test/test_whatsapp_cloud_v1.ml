@@ -472,6 +472,61 @@ let test_missing_token_error () =
       | Error (Error_types.Auth_error Error_types.Missing_token) -> ()
       | Error err -> fail ("expected Missing_token, got " ^ Error_types.to_string err))
 
+let test_read_messages_from_webhook_payload () =
+  Mock_http.reset ();
+  let payload =
+    "{\"entry\":[{\"changes\":[{\"value\":{\"messages\":[{\"id\":\"wamid.in.1\",\"from\":\"15551234567\",\"timestamp\":\"1712345678\",\"text\":{\"body\":\"hello from inbound\"}}]}}]}]}"
+  in
+  let request =
+    Platform_types.{ cursor = None; limit = None; webhook_payload = Some payload; metadata = [] }
+  in
+  Connector.read_messages ~account_id:"acct" request (function
+    | Error err -> fail ("expected read_messages success, got " ^ Error_types.to_string err)
+    | Ok result ->
+        if result.next_cursor <> None then fail "expected no cursor for webhook reads";
+        if result.has_more then fail "expected has_more=false for webhook reads";
+        match result.messages with
+        | [ msg ] ->
+            if msg.id <> "wamid.in.1" then fail "expected inbound message id";
+            if msg.sender_id <> Some "15551234567" then fail "expected inbound sender_id";
+            if msg.text <> Some "hello from inbound" then fail "expected inbound text"
+        | _ -> fail "expected one inbound message")
+
+let test_read_messages_requires_webhook_payload () =
+  Mock_http.reset ();
+  let request =
+    Platform_types.{ cursor = None; limit = None; webhook_payload = None; metadata = [] }
+  in
+  Connector.read_messages ~account_id:"acct" request (function
+    | Ok _ -> fail "expected validation error for missing webhook payload"
+    | Error (Error_types.Validation_error errors) ->
+        if
+          not
+            (List.exists
+               (fun err ->
+                 err.Error_types.field = "webhook_payload"
+                 && err.message = "is required for whatsapp-cloud read_messages")
+               errors)
+        then
+          fail "expected missing webhook_payload validation error"
+    | Error err -> fail ("expected Validation_error, got " ^ Error_types.to_string err))
+
+let test_acknowledge_read_success () =
+  Mock_http.reset ();
+  Mock_http.post_responses := [ Ok { Http_client.status = 200; headers = []; body = "{}" } ];
+  Connector.acknowledge_read ~account_id:"acct" ~message_id:"wamid.in.1" (function
+    | Error err -> fail ("expected acknowledge_read success, got " ^ Error_types.to_string err)
+    | Ok () -> ());
+  match !(Mock_http.last_post_body) with
+  | None -> fail "expected acknowledge_read POST body"
+  | Some body ->
+      let json = Yojson.Basic.from_string body in
+      let open Yojson.Basic.Util in
+      if json |> member "status" |> to_string <> "read" then
+        fail "expected read status payload";
+      if json |> member "message_id" |> to_string <> "wamid.in.1" then
+        fail "expected acknowledge_read message_id"
+
 let () =
   test_send_message_text_success ();
   test_send_message_includes_context_and_tracker_metadata ();
@@ -490,4 +545,7 @@ let () =
   test_validate_access_forbidden_maps_unauthorized ();
   test_validate_access_rate_limited_retry_after_header ();
   test_send_thread_partial_result ();
-  test_missing_token_error ()
+  test_missing_token_error ();
+  test_read_messages_from_webhook_payload ();
+  test_read_messages_requires_webhook_payload ();
+  test_acknowledge_read_success ()

@@ -474,8 +474,54 @@ let test_validate_access_payload_rate_limit_retry_after_header () =
         ()
     | Error err ->
         fail
-          ("expected Rate_limited with retry_after_seconds=Some 13, got "
-         ^ Error_types.to_string err))
+           ("expected Rate_limited with retry_after_seconds=Some 13, got "
+          ^ Error_types.to_string err))
+
+let test_read_messages_success_with_limit () =
+  reset_env ();
+  Mock_http.next_get_response :=
+    Ok
+      { Http_client.status = 200
+      ; headers = []
+      ; body =
+          "[{\"timestamp\":1710000001,\"sourceNumber\":\"+12025550111\",\"dataMessage\":{\"message\":\"one\"}},{\"timestamp\":1710000002,\"source\":\"+12025550112\",\"message\":\"two\"}]"
+      };
+  let request =
+    Platform_types.{ cursor = None; limit = Some 1; webhook_payload = None; metadata = [] }
+  in
+  Connector.read_messages ~account_id:"+12025550000" request (function
+    | Error err -> fail ("expected read_messages success, got " ^ Error_types.to_string err)
+    | Ok result ->
+        if result.next_cursor <> None then fail "expected no cursor";
+        if not result.has_more then fail "expected has_more=true when limit truncates";
+        match result.messages with
+        | [ msg ] ->
+            if msg.id <> "1710000001" then fail "expected first message id";
+            if msg.sender_id <> Some "+12025550111" then fail "expected sender_id";
+            if msg.text <> Some "one" then fail "expected text"
+        | _ -> fail "expected one message after limit")
+
+let test_read_messages_payload_error_on_2xx () =
+  reset_env ();
+  Mock_http.next_get_response :=
+    Ok
+      { Http_client.status = 200
+      ; headers = []
+      ; body = "{\"ok\":false,\"error\":\"unauthorized\",\"code\":401}"
+      };
+  let request =
+    Platform_types.{ cursor = None; limit = None; webhook_payload = None; metadata = [] }
+  in
+  Connector.read_messages ~account_id:"+12025550000" request (function
+    | Ok _ -> fail "expected auth error"
+    | Error (Error_types.Auth_error Error_types.Invalid_token) -> ()
+    | Error err -> fail ("expected Invalid_token, got " ^ Error_types.to_string err))
+
+let test_acknowledge_read_unsupported () =
+  Connector.acknowledge_read ~account_id:"+12025550000" ~message_id:"1710000001" (function
+    | Ok () -> fail "expected unsupported acknowledge_read error"
+    | Error (Error_types.Internal_error _) -> ()
+    | Error err -> fail ("expected Internal_error, got " ^ Error_types.to_string err))
 
 let () =
   test_send_message_success ();
@@ -496,4 +542,7 @@ let () =
   test_send_message_invalid_json_success_body ();
   test_send_message_success_missing_identifier ();
   test_validate_access_payload_auth_mapping ();
-  test_validate_access_payload_rate_limit_retry_after_header ()
+  test_validate_access_payload_rate_limit_retry_after_header ();
+  test_read_messages_success_with_limit ();
+  test_read_messages_payload_error_on_2xx ();
+  test_acknowledge_read_unsupported ()

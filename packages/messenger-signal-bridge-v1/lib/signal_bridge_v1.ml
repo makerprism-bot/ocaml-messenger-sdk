@@ -11,9 +11,11 @@ end
 
 module Make (Config : CONFIG) : Connector_intf.S = struct
   let platform = platform
+  let supports_explicit_read_ack = false
 
   let send_path = "/v2/send"
   let health_path = "/v1/health"
+  let receive_path account_id = "/v1/receive/" ^ account_id
 
   let trim_trailing_slashes value =
     let rec loop idx =
@@ -74,7 +76,7 @@ module Make (Config : CONFIG) : Connector_intf.S = struct
     else
       trimmed
 
-  let destination_of_message message =
+  let destination_of_message (message : Platform_types.outbound_message) =
     let metadata_group =
       message.Platform_types.metadata
       |> List.find_map (fun (key, value) ->
@@ -171,6 +173,80 @@ module Make (Config : CONFIG) : Connector_intf.S = struct
       pick_first candidates
     with _ ->
       None
+
+  let inbound_message_from_json json =
+    let sender_id_candidates value =
+      [ assoc_member "sourceNumber" value
+      ; assoc_member "source" value
+      ; assoc_member "sourceUuid" value
+      ; Option.bind (assoc_member "envelope" value) (assoc_member "sourceNumber")
+      ; Option.bind (assoc_member "envelope" value) (assoc_member "source")
+      ; Option.bind (assoc_member "envelope" value) (assoc_member "sourceUuid")
+      ]
+    in
+    let text_candidates value =
+      [ assoc_member "message" value
+      ; Option.bind (assoc_member "dataMessage" value) (assoc_member "message")
+      ; Option.bind (Option.bind (assoc_member "envelope" value) (assoc_member "dataMessage")) (assoc_member "message")
+      ]
+    in
+    let id_opt =
+      List.find_map (fun candidate -> Option.bind candidate json_string_or_int)
+        [ assoc_member "id" json
+        ; assoc_member "message_id" json
+        ; assoc_member "messageId" json
+        ; assoc_member "timestamp" json
+        ; Option.bind (assoc_member "envelope" json) (assoc_member "timestamp")
+        ; Option.bind (assoc_member "envelope" json) (assoc_member "id")
+        ]
+    in
+    match id_opt with
+    | None -> None
+    | Some id ->
+        let sender_id =
+          List.find_map (fun candidate -> Option.bind candidate json_string_or_int)
+            (sender_id_candidates json)
+        in
+        let text =
+          List.find_map (fun candidate -> Option.bind candidate json_string_or_int)
+            (text_candidates json)
+        in
+        let metadata =
+          match Option.bind (assoc_member "type" json) json_string_or_int with
+          | Some kind -> [ ("type", kind) ]
+          | None -> []
+        in
+        Some
+          { Platform_types.id = id
+          ; sender_id
+          ; text
+          ; raw_payload = Yojson.Basic.to_string json
+          ; metadata
+          }
+
+  let parse_receive_messages body =
+    let collect_items json =
+      match json with
+      | `List values -> values
+      | _ ->
+          (match assoc_member "messages" json with
+           | Some (`List values) -> values
+           | _ ->
+               (match assoc_member "result" json with
+                | Some (`List values) -> values
+                | Some (`Assoc fields) ->
+                    (match List.assoc_opt "messages" fields with
+                     | Some (`List values) -> values
+                     | _ -> [])
+                | _ -> []))
+    in
+    try
+      let json = Yojson.Basic.from_string body in
+      Ok (collect_items json |> List.filter_map inbound_message_from_json)
+    with _ ->
+      Error
+        Error_types.
+          (Internal_error "signal bridge receive response is not valid JSON")
 
   let parse_error_message body =
     try
@@ -433,6 +509,70 @@ module Make (Config : CONFIG) : Connector_intf.S = struct
                      (Error
                         Error_types.
                           (Network_error (Connection_failed message)))))
-           (fun err -> on_result (Error err)))
+            (fun err -> on_result (Error err)))
       (fun err -> on_result (Error err))
+
+  let read_messages ~account_id request on_result =
+    match Connector_intf.validate_read_request request with
+    | Error errors -> on_result (Error (Error_types.Validation_error errors))
+    | Ok () ->
+        with_endpoint ~account_id
+          (fun endpoint ->
+             with_token ~account_id
+               (fun token ->
+                  Config.Http.get
+                    ~headers:[ ("Authorization", "Bearer " ^ token) ]
+                    (endpoint_url ~base:endpoint (receive_path account_id))
+                    (fun response ->
+                      if is_success_status response.status then
+                        (match parse_payload_error response.body with
+                         | Some payload_error ->
+                             on_result
+                               (Error
+                                  (classify_error ~status:response.status
+                                     ~headers:response.headers ~body:response.body
+                                     (Some payload_error)))
+                         | None ->
+                             (match parse_receive_messages response.body with
+                              | Ok messages ->
+                                  let limited_messages =
+                                    match request.limit with
+                                    | None -> messages
+                                    | Some limit ->
+                                        let rec take acc remaining values =
+                                          match (remaining, values) with
+                                          | 0, _
+                                          | _, [] -> List.rev acc
+                                          | n, head :: tail ->
+                                              take (head :: acc) (n - 1) tail
+                                        in
+                                        take [] limit messages
+                                  in
+                                  let has_more =
+                                    match request.limit with
+                                    | None -> false
+                                    | Some limit -> List.length messages > limit
+                                  in
+                                  on_result
+                                    (Ok
+                                       { Platform_types.messages = limited_messages
+                                       ; next_cursor = None
+                                       ; has_more
+                                       })
+                              | Error err -> on_result (Error err)))
+                      else
+                        on_result (Error (classify_http_error response)))
+                    (fun message ->
+                      on_result
+                        (Error
+                           Error_types.
+                             (Network_error (Connection_failed message)))))
+               (fun err -> on_result (Error err)))
+          (fun err -> on_result (Error err))
+
+  let acknowledge_read ~account_id:_ ~message_id:_ on_result =
+    on_result
+      (Error
+         (Error_types.Internal_error
+            "signal-bridge-v1 does not support explicit read acknowledgements"))
 end

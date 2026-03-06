@@ -11,6 +11,7 @@ end
 
 module Make (Config : CONFIG) : Connector_intf.S = struct
   let platform = platform
+  let supports_explicit_read_ack = false
 
   let parse_message_id json =
     let open Yojson.Basic.Util in
@@ -19,6 +20,119 @@ module Make (Config : CONFIG) : Connector_intf.S = struct
     | `Int i -> Some (string_of_int i)
     | `String s when String.trim s <> "" -> Some s
     | _ -> None
+
+  let int_of_cursor_opt cursor_opt =
+    match cursor_opt with
+    | None -> Ok None
+    | Some cursor ->
+        let trimmed = String.trim cursor in
+        if trimmed = "" then Ok None
+        else
+          try Ok (Some (int_of_string trimmed))
+          with _ ->
+            Error
+              Error_types.
+                (Validation_error
+                   [ { field = "cursor"; message = "must be a valid integer" } ])
+
+  let parse_update_id = function
+    | `Assoc fields ->
+        (match List.assoc_opt "update_id" fields with
+         | Some (`Int value) -> Some value
+         | Some (`String value) ->
+             (try Some (int_of_string (String.trim value)) with _ -> None)
+         | _ -> None)
+    | _ -> None
+
+  let assoc_member key = function
+    | `Assoc fields -> List.assoc_opt key fields
+    | _ -> None
+
+  let json_string_or_int = function
+    | `String value when String.trim value <> "" -> Some (String.trim value)
+    | `Int value -> Some (string_of_int value)
+    | _ -> None
+
+  let inbound_message_of_update update =
+    let message_json =
+      match assoc_member "message" update with
+      | Some (`Assoc _ as value) -> Some value
+      | _ ->
+          (match assoc_member "channel_post" update with
+           | Some (`Assoc _ as value) -> Some value
+           | _ -> None)
+    in
+    let update_id = parse_update_id update in
+    match message_json with
+    | None -> None
+    | Some message ->
+        let id_opt =
+          Option.bind (assoc_member "message_id" message) json_string_or_int
+        in
+        (match id_opt with
+         | None -> None
+         | Some id ->
+             let sender_id =
+               match Option.bind (Option.bind (assoc_member "from" message) (assoc_member "id")) json_string_or_int with
+               | Some value -> Some value
+               | None ->
+                   Option.bind
+                     (Option.bind (assoc_member "chat" message) (assoc_member "id"))
+                     json_string_or_int
+             in
+             let text =
+               match assoc_member "text" message with
+               | Some (`String value) -> Some value
+               | _ ->
+                   (match assoc_member "caption" message with
+                    | Some (`String value) -> Some value
+                    | _ -> None)
+             in
+             let metadata =
+               match update_id with
+               | Some value -> [ ("update_id", string_of_int value) ]
+               | None -> []
+             in
+             Some
+               { Platform_types.id = id
+               ; sender_id
+               ; text
+               ; raw_payload = Yojson.Basic.to_string message
+               ; metadata
+               })
+
+  let parse_updates_read_result ?limit json =
+    let open Yojson.Basic.Util in
+    let ok =
+      try json |> member "ok" |> to_bool with _ -> false
+    in
+    if not ok then
+      let message =
+        try json |> member "description" |> to_string
+        with _ -> "Telegram API error"
+      in
+      let code =
+        try json |> member "error_code" |> to_int
+        with _ -> 200
+      in
+      Error (Error_types.Api_error { code; message; retriable = false })
+    else
+      let updates =
+        try json |> member "result" |> to_list with _ -> []
+      in
+      let messages = List.filter_map inbound_message_of_update updates in
+      let next_cursor =
+        updates
+        |> List.filter_map parse_update_id
+        |> List.fold_left (fun acc value -> max acc value) (-1)
+        |> fun max_value -> if max_value < 0 then None else Some (string_of_int (max_value + 1))
+      in
+      let has_more =
+        match limit with
+        | Some value -> List.length updates >= value
+        | None -> false
+      in
+      Ok { Platform_types.messages = messages; next_cursor; has_more }
 
   let parse_api_error status body =
     let default_message = "Telegram API error" in
@@ -279,7 +393,57 @@ module Make (Config : CONFIG) : Connector_intf.S = struct
             else
               on_result (Error (parse_api_error resp.status resp.body)))
           (fun err_msg ->
-            on_result
-              (Error Error_types.(Network_error (Connection_failed err_msg)))))
+           on_result
+             (Error Error_types.(Network_error (Connection_failed err_msg)))))
       (fun err -> on_result (Error err))
+
+  let read_messages ~account_id request on_result =
+    match Connector_intf.validate_read_request request with
+    | Error errors -> on_result (Error (Error_types.Validation_error errors))
+    | Ok () ->
+        (match int_of_cursor_opt request.cursor with
+         | Error err -> on_result (Error err)
+         | Ok offset_opt ->
+             with_token ~account_id
+               (fun token ->
+                 let fields =
+                   []
+                   |> fun acc ->
+                   match offset_opt with
+                   | Some offset -> ("offset", `Int offset) :: acc
+                   | None -> acc
+                   |> fun acc ->
+                   match request.limit with
+                   | Some limit -> ("limit", `Int limit) :: acc
+                   | None -> acc
+                 in
+                 let payload = `Assoc (List.rev fields) in
+                 Config.Http.post
+                   ~headers:[ ("Content-Type", "application/json") ]
+                   ~body:(Yojson.Basic.to_string payload)
+                   (telegram_url ~token "getUpdates")
+                   (fun response ->
+                     if response.status >= 200 && response.status < 300 then
+                       (try
+                          let json = Yojson.Basic.from_string response.body in
+                          (match parse_updates_read_result ?limit:request.limit json with
+                           | Ok result -> on_result (Ok result)
+                           | Error err -> on_result (Error err))
+                        with _ ->
+                          on_result
+                            (Error
+                               (Error_types.Internal_error
+                                  "Failed to parse Telegram getUpdates response")))
+                     else
+                       on_result (Error (parse_api_error response.status response.body)))
+                   (fun err_msg ->
+                     on_result
+                       (Error Error_types.(Network_error (Connection_failed err_msg)))))
+               (fun err -> on_result (Error err)))
+
+  let acknowledge_read ~account_id:_ ~message_id:_ on_result =
+    on_result
+      (Error
+         (Error_types.Internal_error
+            "telegram-bot-v1 does not support explicit read acknowledgements"))
 end

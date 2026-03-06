@@ -12,6 +12,7 @@ end
 
 module Make (Config : CONFIG) : Connector_intf.S = struct
   let platform = platform
+  let supports_explicit_read_ack = true
 
   let with_token ~account_id on_ok on_error =
     match Config.get_access_token ~account_id with
@@ -121,6 +122,64 @@ module Make (Config : CONFIG) : Connector_intf.S = struct
       | [] -> None
     with _ -> None
 
+  let inbound_message_of_webhook_message message_json =
+    let open Yojson.Basic.Util in
+    let id_opt =
+      match message_json |> member "id" with
+      | `String value when String.trim value <> "" -> Some (String.trim value)
+      | `Int value -> Some (string_of_int value)
+      | _ -> None
+    in
+    match id_opt with
+    | None -> None
+    | Some id ->
+        let sender_id =
+          match message_json |> member "from" with
+          | `String value when String.trim value <> "" -> Some (String.trim value)
+          | `Int value -> Some (string_of_int value)
+          | _ -> None
+        in
+        let text =
+          match message_json |> member "text" |> member "body" with
+          | `String value -> Some value
+          | _ -> None
+        in
+        let metadata =
+          let base = [ ("source", "webhook") ] in
+          match message_json |> member "timestamp" with
+          | `String value when String.trim value <> "" -> ("timestamp", String.trim value) :: base
+          | `Int value -> ("timestamp", string_of_int value) :: base
+          | _ -> base
+        in
+        Some
+          { Platform_types.id = id
+          ; sender_id
+          ; text
+          ; raw_payload = Yojson.Basic.to_string message_json
+          ; metadata = List.rev metadata
+          }
+
+  let parse_webhook_messages payload =
+    let open Yojson.Basic.Util in
+    try
+      let json = Yojson.Basic.from_string payload in
+      let entries = json |> member "entry" |> to_list in
+      let messages =
+        entries
+        |> List.concat_map (fun entry ->
+               entry
+               |> member "changes"
+               |> to_list
+               |> List.concat_map (fun change ->
+                      change |> member "value" |> member "messages" |> to_list))
+      in
+      Ok (List.filter_map inbound_message_of_webhook_message messages)
+    with _ ->
+      Error
+        Error_types.
+          (Validation_error
+             [ { field = "webhook_payload"; message = "must be valid WhatsApp webhook JSON" } ])
+
   type media_kind =
     | Image
     | Video
@@ -170,7 +229,7 @@ module Make (Config : CONFIG) : Connector_intf.S = struct
           | "csv" | "rtf" -> Some Document
           | _ -> None
 
-  let build_message_payload message =
+  let build_message_payload (message : Platform_types.outbound_message) =
     let metadata_value key =
       message.Platform_types.metadata
       |> List.find_map (fun (k, v) ->
@@ -310,7 +369,74 @@ module Make (Config : CONFIG) : Connector_intf.S = struct
               on_result
                 (Error (parse_api_error response.status response.headers response.body)))
           (fun err_msg ->
-            on_result
-              (Error Error_types.(Network_error (Connection_failed err_msg)))))
+           on_result
+             (Error Error_types.(Network_error (Connection_failed err_msg)))))
       (fun err -> on_result (Error err))
+
+  let read_messages ~account_id:_ request on_result =
+    match Connector_intf.validate_read_request request with
+    | Error errors -> on_result (Error (Error_types.Validation_error errors))
+    | Ok () ->
+        (match request.Platform_types.webhook_payload with
+         | None ->
+             on_result
+               (Error
+                  Error_types.
+                    (Validation_error
+                       [ { field = "webhook_payload"
+                         ; message = "is required for whatsapp-cloud read_messages"
+                         }
+                       ]))
+         | Some payload ->
+             (match parse_webhook_messages payload with
+              | Error err -> on_result (Error err)
+              | Ok messages ->
+                  on_result
+                    (Ok
+                       { Platform_types.messages = messages
+                       ; next_cursor = None
+                       ; has_more = false
+                       })))
+
+  let acknowledge_read ~account_id ~message_id on_result =
+    if String.trim message_id = "" then
+      on_result
+        (Error
+           Error_types.
+             (Validation_error
+                [ { field = "message_id"; message = "must not be empty" } ]))
+    else
+      with_token ~account_id
+        (fun token ->
+          let payload =
+            `Assoc
+              [ ("messaging_product", `String "whatsapp")
+              ; ("status", `String "read")
+              ; ("message_id", `String message_id)
+              ]
+          in
+          Config.Http.post
+            ~headers:
+              [ ("Authorization", "Bearer " ^ token)
+              ; ("Content-Type", "application/json")
+              ]
+            ~body:(Yojson.Basic.to_string payload)
+            (messages_url ~account_id)
+            (fun response ->
+              if response.status >= 200 && response.status < 300 then
+                if has_api_error_payload response.body then
+                  on_result
+                    (Error
+                       (parse_api_error response.status response.headers response.body))
+                else
+                  on_result (Ok ())
+              else
+                on_result
+                  (Error
+                     (parse_api_error response.status response.headers response.body)))
+            (fun err_msg ->
+              on_result
+                (Error
+                   Error_types.(Network_error (Connection_failed err_msg)))))
+        (fun err -> on_result (Error err))
 end
